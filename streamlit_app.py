@@ -1,56 +1,113 @@
 import streamlit as st
-from openai import OpenAI
+from langchain.chat_models import init_chat_model
+from langchain_groq import ChatGroq
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+import os
 
-# Show title and description.
-st.title("💬 Chatbot")
-st.write(
-    "This is a simple chatbot that uses OpenAI's GPT-3.5 model to generate responses. "
-    "To use this app, you need to provide an OpenAI API key, which you can get [here](https://platform.openai.com/account/api-keys). "
-    "You can also learn how to build this app step by step by [following our tutorial](https://docs.streamlit.io/develop/tutorials/llms/build-conversational-apps)."
+
+
+# Set up the Streamlit app
+st.set_page_config(page_title="LangChain Chatbot with Groq")
+
+# Title
+st.title("LangChain Chatbot with Groq")
+st.markdown(
+    """
+    This is a simple chatbot application built using LangChain and Groq. 
+    Enter your Groq API key, select a model, and start chatting!
+    """
 )
 
-# Ask user for their OpenAI API key via `st.text_input`.
-# Alternatively, you can store the API key in `./.streamlit/secrets.toml` and access it
-# via `st.secrets`, see https://docs.streamlit.io/develop/concepts/connections/secrets-management
-openai_api_key = st.text_input("OpenAI API Key", type="password")
-if not openai_api_key:
-    st.info("Please add your OpenAI API key to continue.", icon="🗝️")
-else:
+with st.sidebar:
+    st.header("Settings")
 
-    # Create an OpenAI client.
-    client = OpenAI(api_key=openai_api_key)
+    # API Key input
+    api_key = st.text_input("Enter your Groq API Key", type="password", help="You can find your API key from console.groq.com")
 
-    # Create a session state variable to store the chat messages. This ensures that the
-    # messages persist across reruns.
-    if "messages" not in st.session_state:
+    if not api_key:
+        st.warning("Please enter your Groq API Key.")
+
+    # Model selection
+    model_name = st.selectbox("Select a model", ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "meta-llama/llama-prompt-guard-2-22m"], index=0, help="Choose the model you want to use for the chatbot.")
+
+    if st.button("Clear chat"):
         st.session_state.messages = []
+        st.rerun()
 
-    # Display the existing chat messages via `st.chat_message`.
+    
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+
+#initialize the chat model
+@st.cache_resource
+def get_chat_model(api_key, model_name):
+    if not api_key:
+        return None
+    
+    llm =ChatGroq(
+        groq_api_key=api_key,
+        model_name=model_name,
+        temperature=0.7,
+        streaming=True)
+
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", "You are a helpful assistant powered by Groq. Answer the user's questions to the best of your ability. Answer in a concise and clear manner. If you don't know the answer, say 'I don't know'."),
+        MessagesPlaceholder(variable_name="chat_history"),
+        ("user", "{input}")
+    ])
+
+    chain = prompt | llm | StrOutputParser()
+    return chain
+
+# get chain
+
+chain = get_chat_model(api_key, model_name)
+
+
+if not chain:
+    st.warning("Please enter your Groq API Key to initialize the chatbot.")
+    st.markdown("You can find your API key from [console.groq.com](https://console.groq.com).")
+else:
+    ## Display chat messages from history on app rerun
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+            st.write(message["content"])
 
-    # Create a chat input field to allow the user to enter a message. This will display
-    # automatically at the bottom of the page.
-    if prompt := st.chat_input("What is up?"):
-
-        # Store and display the current prompt.
-        st.session_state.messages.append({"role": "user", "content": prompt})
+    ## User input
+    if prompt := st.chat_input("Ask me anything!"):
+        # 1. User message display karein
         with st.chat_message("user"):
             st.markdown(prompt)
 
-        # Generate a response using the OpenAI API.
-        stream = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": m["role"], "content": m["content"]}
-                for m in st.session_state.messages
-            ],
-            stream=True,
-        )
+        # 2. Existing messages se chat_history list taiyar karein (current prompt se pehle ke messages)
+        chat_history = []
+        for msg in st.session_state.messages:
+            if msg["role"] == "user":
+                chat_history.append(HumanMessage(content=msg["content"]))
+            elif msg["role"] == "assistant":
+                chat_history.append(AIMessage(content=msg["content"]))
 
-        # Stream the response to the chat using `st.write_stream`, then store it in 
-        # session state.
+        # 3. Current user prompt ko session state me add karein
+        st.session_state.messages.append({"role": "user", "content": prompt})
+
+        # 4. Stream response (dono keys pass karni hain)
         with st.chat_message("assistant"):
-            response = st.write_stream(stream)
-        st.session_state.messages.append({"role": "assistant", "content": response})
+            message_placeholder = st.empty()
+            full_response = ""
+
+            try:
+                for chunk in chain.stream({
+                    "input": prompt,
+                    "chat_history": chat_history   # <-- Yeh pass hona zaroori hai
+                }):
+                    full_response += chunk
+                    message_placeholder.markdown(full_response + "|")  # Streaming indicator
+
+                message_placeholder.markdown(full_response)
+                st.session_state.messages.append({"role": "assistant", "content": full_response})
+
+            except Exception as e:
+                st.error(f"An error occurred: {str(e)}")
